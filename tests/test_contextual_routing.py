@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from database_optimiser.adaptive.contextual_bandit import (
     ContextualBanditPolicy,
@@ -46,7 +46,7 @@ def test_contextual_policy_prefers_layout_matching_filter(tmp_path):
     )
 
     # Add a mild global reward advantage to layout_b, but context should override via bonus.
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     store.record_evaluation(
         layout_id="layout_b",
         eval_window_start=now - timedelta(hours=2),
@@ -63,3 +63,47 @@ def test_contextual_policy_prefers_layout_matching_filter(tmp_path):
 
     chosen = policy.select_layout(table_name="nyc_taxi", context=ctx)
     assert chosen == "layout_a"
+
+
+def test_low_confidence_parse_does_not_use_contextual_policy(tmp_path):
+    # Force regex fallback by using a bad dialect in config so confidence is low for CTE/subquery.
+    config = Config(
+        data_dir=tmp_path / "data",
+        metadata_db_path=tmp_path / "meta.db",
+        exploration_rate=0.0,
+    )
+    config.sql_parser_dialect = "__nope__"
+    config.parse_confidence_threshold = 0.7
+    config.ensure_dirs()
+    store = MetadataStore(config)
+    store.create_layout(
+        layout_id="l1",
+        table_name="t",
+        partition_cols=None,
+        sort_cols=None,
+        layout_path=str(tmp_path / "l1"),
+        file_size_mb=1.0,
+    )
+
+    from database_optimiser.adaptive.explorer import LayoutExplorer
+
+    class _Dummy:
+        pass
+
+    explorer = LayoutExplorer(
+        config,
+        store,
+        _Dummy(),  # type: ignore[arg-type]
+        _Dummy(),  # type: ignore[arg-type]
+        _Dummy(),  # type: ignore[arg-type]
+        _Dummy(),  # type: ignore[arg-type]
+    )
+
+    def _boom(*_args, **_kwargs):
+        raise AssertionError("contextual policy should not be called")
+
+    explorer.contextual_policy.select_layout = _boom  # type: ignore[assignment]
+
+    sql = "WITH x AS (SELECT * FROM t) SELECT * FROM x"
+    chosen = explorer.select_layout_for_query("t", sql=sql)
+    assert chosen == "l1"

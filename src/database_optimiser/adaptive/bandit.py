@@ -184,6 +184,9 @@ class MultiArmedBandit:
         from ..layout.spec import LayoutSpec
 
         layouts = self.metadata_store.get_all_layouts(table_name)
+        stats = self.metadata_store.get_reward_stats_for_table(
+            table_name=table_name
+        )
 
         for layout in layouts:
             layout_id = layout["layout_id"]
@@ -200,24 +203,9 @@ class MultiArmedBandit:
             if layout_id not in self.arms:
                 self.add_arm(layout_id, layout_spec)
 
-            # Load evaluations and update arm statistics
-            evaluations = self.metadata_store.get_layout_evaluations(layout_id)
-
-            if evaluations:
-                raw_rewards = [e.get("reward_score") for e in evaluations]
-                rewards: list[float] = [
-                    float(r) for r in raw_rewards if r is not None
-                ]
-                if rewards:
-                    avg_reward = sum(rewards) / len(rewards)
-                    # Update arm with evaluation data
-                    self.arms[layout_id].mean_reward = avg_reward
-                    self.arms[layout_id].pulls = len(rewards)
-                    self.arms[layout_id].total_reward = avg_reward * len(
-                        rewards
-                    )
-                else:
-                    # Only insufficient-data evaluations so far
-                    self.arms[layout_id].mean_reward = 0.0
-                    self.arms[layout_id].pulls = 0
-                    self.arms[layout_id].total_reward = 0.0
+            s = stats.get(layout_id, {})
+            n = int(s.get("n", 0) or 0)
+            mean = float(s.get("mean_reward", 0.0) or 0.0)
+            self.arms[layout_id].pulls = n
+            self.arms[layout_id].mean_reward = mean
+            self.arms[layout_id].total_reward = mean * n

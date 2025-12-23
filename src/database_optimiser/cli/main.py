@@ -1,7 +1,7 @@
 """CLI interface for the database optimizer."""
 
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import click
@@ -87,7 +87,7 @@ def generate(ctx, table_name, num_rows):
 )
 @click.pass_context
 def load_dataset(ctx, table_name, source_path):
-    """Load an external Parquet dataset (e.g., NYC taxi data)."""
+    """Load an external Parquet dataset (Parquet file(s) or directory)."""
     config = ctx.obj["config"]
     generator = DatasetGenerator(config)
 
@@ -105,39 +105,21 @@ def load_dataset(ctx, table_name, source_path):
 
 
 @cli.command()
-@click.option("--table-name", required=True, help="Table name")
-@click.option("--year", default=2023, help="Year of data to download")
-@click.option("--month", default=1, help="Month of data to download")
-@click.option(
-    "--color",
-    default="yellow",
-    type=click.Choice(["yellow", "green"]),
-    help="Taxi color",
-)
-@click.pass_context
-def download_nyc_taxi(ctx, table_name, year, month, color):
-    """Download NYC taxi data directly from the official source."""
-    config = ctx.obj["config"]
-    generator = DatasetGenerator(config)
-
-    click.echo(f"Downloading NYC {color} taxi data for {year}-{month:02d}...")
-
-    try:
-        output_path = generator.download_nyc_taxi(
-            table_name=table_name,
-            year=year,
-            month=month,
-            color=color,
-        )
-        click.echo(f"✓ Dataset downloaded to {output_path}")
-    except Exception as e:
-        click.echo(f"✗ Error: {str(e)}")
-        raise click.Abort()
-
-
-@cli.command()
 @click.option("--table-name", default="events", help="Table name")
 @click.option("--num-queries", default=100, help="Number of queries to run")
+@click.option(
+    "--workload",
+    "workload_mode",
+    type=click.Choice(["auto", "events", "schema"]),
+    default="auto",
+    show_default=True,
+    help=(
+        "Workload generator: "
+        "events=events-like synthetic queries; "
+        "schema=generic schema-driven queries; "
+        "auto=events for table 'events', else schema."
+    ),
+)
 @click.option(
     "--explore/--no-explore",
     default=True,
@@ -150,8 +132,10 @@ def download_nyc_taxi(ctx, table_name, year, month, color):
     help="Override exploration rate for this run (0..1)",
 )
 @click.pass_context
-def run_workload(ctx, table_name, num_queries, explore, exploration_rate):
-    """Run synthetic query workload."""
+def run_workload(
+    ctx, table_name, num_queries, workload_mode, explore, exploration_rate
+):
+    """Run a query workload and log telemetry."""
     config = ctx.obj["config"]
 
     if exploration_rate is not None:
@@ -208,10 +192,20 @@ def run_workload(ctx, table_name, num_queries, explore, exploration_rate):
 
     # Generate queries
     generator = DatasetGenerator(config)
-    queries = generator.generate_workload_queries(
-        table_name=table_name,
-        num_queries=num_queries,
-    )
+    if workload_mode == "auto":
+        workload_mode = "events" if table_name == "events" else "schema"
+
+    if workload_mode == "events":
+        queries = generator.generate_workload_queries(
+            table_name=table_name,
+            num_queries=num_queries,
+        )
+    else:
+        queries = generator.generate_schema_workload_queries(
+            table_name=table_name,
+            num_queries=num_queries,
+            query_executor=query_executor,
+        )
 
     ui.echo(f"Running {len(queries)} queries...")
 
@@ -247,121 +241,6 @@ def run_workload(ctx, table_name, num_queries, explore, exploration_rate):
 
     if prog:
         prog.__exit__(None, None, None)
-
-    query_executor.close()
-
-
-@cli.command()
-@click.option("--table-name", required=True, help="Table name")
-@click.option("--num-queries", default=100, help="Number of queries to run")
-@click.option(
-    "--explore/--no-explore",
-    default=True,
-    help="Route queries across layouts using exploration/exploitation",
-)
-@click.option(
-    "--exploration-rate",
-    default=None,
-    type=float,
-    help="Override exploration rate for this run (0..1)",
-)
-@click.pass_context
-def run_nyc_taxi_workload(
-    ctx, table_name, num_queries, explore, exploration_rate
-):
-    """Run query workload for NYC taxi data."""
-    config = ctx.obj["config"]
-    ui: UI = ctx.obj["ui"]
-
-    if exploration_rate is not None:
-        config.exploration_rate = exploration_rate
-
-    # Initialize components
-    metadata_store = MetadataStore(config)
-    query_logger = QueryLogger(metadata_store, config)
-    query_executor = QueryExecutor(config, metadata_store, query_logger)
-    workload_analyzer = WorkloadAnalyzer(metadata_store)
-    layout_generator = LayoutGenerator(workload_analyzer, config)
-    layout_migrator = LayoutMigrator(config, metadata_store)
-    metrics_calculator = MetricsCalculator(metadata_store)
-    reward_calculator = RewardCalculator(
-        metrics_calculator, config, metadata_store
-    )
-    explorer = LayoutExplorer(
-        config,
-        metadata_store,
-        layout_generator,
-        layout_migrator,
-        reward_calculator,
-        query_executor,
-    )
-
-    # Register table - check for active layout first
-    active_layout = metadata_store.get_active_layout(table_name)
-    if active_layout:
-        # Use active layout
-        query_executor.register_layout(
-            table_name,
-            active_layout["layout_path"],
-            active_layout["layout_id"],
-        )
-        ui.echo(
-            f"Registered {table_name} table with active layout: {active_layout['layout_id']}"
-        )
-    else:
-        # Fall back to initial layout
-        taxi_path = config.data_dir / table_name / "layout_initial"
-        if taxi_path.exists():
-            query_executor.register_table(table_name, str(taxi_path))
-            # No layout_id for initial layout
-            query_executor.current_layouts[table_name] = None
-            ui.echo(f"Registered {table_name} table (initial layout)")
-        else:
-            ui.echo(f"✗ Error: No data found at {taxi_path}")
-            ui.echo("  Please download or load NYC taxi data first:")
-            ui.echo(f"  dbopt download-nyc-taxi --table-name {table_name}")
-            query_executor.close()
-            raise click.Abort()
-
-    # Generate queries
-    generator = DatasetGenerator(config)
-    queries = generator.generate_nyc_taxi_queries(
-        table_name=table_name,
-        num_queries=num_queries,
-        query_executor=query_executor,
-    )
-
-    ui.echo(f"Running {len(queries)} queries on NYC taxi data...")
-    ui.echo(
-        f"Exploration routing: {'enabled' if explore else 'disabled'} (exploration_rate={config.exploration_rate})"
-    )
-
-    shown_errors = 0
-
-    def _on_error(i: int, e: Exception) -> None:
-        nonlocal shown_errors
-        if shown_errors < 5:
-            shown_errors += 1
-            ui.echo(f"  Error in query {i}: {str(e)}")
-
-    def _on_progress(i: int, _total_processed: int) -> None:
-        if i % 10 == 0:
-            ui.echo(f"  Processed {i}/{len(queries)} queries...")
-
-    result = run_queries(
-        table_name=table_name,
-        queries=queries,
-        query_executor=query_executor,
-        metadata_store=metadata_store,
-        explore=explore,
-        explorer=explorer,
-        on_error=_on_error,
-        on_progress=_on_progress,
-    )
-
-    ui.echo(
-        f"✓ Completed: {result.success_count} successful, {result.error_count} errors"
-    )
 
     query_executor.close()
 
@@ -1020,7 +899,7 @@ def evaluate(
         )
         if n:
             ui.echo(
-                f"[{datetime.utcnow().isoformat()}] Recorded {n} evaluation(s)."
+                f"[{datetime.now(timezone.utc).isoformat()}] Recorded {n} evaluation(s)."
             )
         time.sleep(sleep_s)
 

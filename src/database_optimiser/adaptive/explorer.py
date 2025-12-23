@@ -1,7 +1,7 @@
 """Layout explorer that routes traffic and manages exploration."""
 
 import random
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional
 
 from ..analyzer.workload_clusterer import WorkloadClusterer
@@ -10,7 +10,7 @@ from ..evaluator.reward import RewardCalculator
 from ..layout.generator import LayoutGenerator
 from ..layout.migrator import LayoutMigrator
 from ..layout.spec import LayoutSpec
-from ..query.context import extract_query_context
+from ..query.context import extract_query_context_result
 from ..query.executor import QueryExecutor
 from ..storage.metadata import MetadataStore
 from .bandit import MultiArmedBandit
@@ -75,15 +75,25 @@ class LayoutExplorer:
         """
         # Contextual routing if query is available
         if sql:
-            ctx = extract_query_context(sql)
-            cluster_id = self.clusterer.cluster_id_for_context_key(ctx.key())
-            lid = self.contextual_policy.select_layout(
-                table_name=table_name,
-                context=ctx,
-                cluster_id=cluster_id,
+            ctx_res = extract_query_context_result(
+                sql, dialect=self.config.sql_parser_dialect
             )
-            if lid is not None:
-                return lid
+            if (
+                ctx_res.parse_success
+                and ctx_res.parse_confidence
+                >= self.config.parse_confidence_threshold
+            ):
+                ctx = ctx_res.context
+                cluster_id = self.clusterer.cluster_id_for_context_key(
+                    ctx.key()
+                )
+                lid = self.contextual_policy.select_layout(
+                    table_name=table_name,
+                    context=ctx,
+                    cluster_id=cluster_id,
+                )
+                if lid is not None:
+                    return lid
 
         # Fallback: global bandit routing
         bandit = self.get_bandit(table_name)
@@ -260,23 +270,40 @@ class LayoutExplorer:
         skipped_insufficient: List[str] = []
 
         # Pre-check query counts here to avoid writing redundant NULL evaluations.
-        end_time = datetime.utcnow()
+        end_time = datetime.now(timezone.utc)
         start_time = end_time - timedelta(hours=self.config.eval_window_hours)
         min_q = int(getattr(self.config, "min_queries_for_eval", 0) or 0)
 
         def _parse_created_at(value) -> datetime:
             # Keep parsing behavior consistent with RewardCalculator
+            def _as_utc(dt: datetime) -> datetime:
+                if dt.tzinfo is None:
+                    return dt.replace(tzinfo=timezone.utc)
+                return dt.astimezone(timezone.utc)
+
             if isinstance(value, str):
                 try:
-                    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+                    return _as_utc(
+                        datetime.fromisoformat(value.replace("Z", "+00:00"))
+                    )
                 except ValueError:
                     try:
-                        return datetime.strptime(value, "%Y-%m-%d %H:%M:%S")
+                        return _as_utc(
+                            datetime.strptime(value, "%Y-%m-%d %H:%M:%S")
+                        )
                     except ValueError:
-                        return datetime.utcnow()
+                        return datetime.now(timezone.utc)
+            if isinstance(value, (int, float)):
+                # epoch ms
+                try:
+                    return datetime.fromtimestamp(
+                        float(value) / 1000.0, tz=timezone.utc
+                    )
+                except Exception:
+                    return datetime.now(timezone.utc)
             if isinstance(value, datetime):
-                return value
-            return datetime.utcnow()
+                return _as_utc(value)
+            return datetime.now(timezone.utc)
 
         for layout in layouts:
             layout_id = layout["layout_id"]

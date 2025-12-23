@@ -10,16 +10,15 @@ This project implements an adaptive database optimizer that:
 - **Proposes** new data layouts based on workload analysis
 - **Migrates** data to optimized layouts (partitioning, sorting)
 - **Evaluates** performance improvements
+- **Routes** queries across layouts (exploration/exploitation)
 - **Learns** from feedback using multi-armed bandit algorithms
-
-Think: AutoML, but for physical data design.
 
 ## Architecture
 
 ### Components
 
 1. **Storage Layer**: SQLite metadata store for query logs, layouts, and evaluations
-2. **Query Executor**: DuckDB wrapper that logs all query telemetry
+2. **Query Execution + Routing**: DuckDB wrapper that routes queries across layouts and logs telemetry
 3. **Workload Analyzer**: Aggregates query patterns and computes column statistics
 4. **Layout Generator**: Heuristic algorithm that proposes layouts based on workload
 5. **Layout Migrator**: Rewrites Parquet datasets with new layouts
@@ -29,17 +28,23 @@ Think: AutoML, but for physical data design.
 ### Data Flow
 
 ```
-Queries → Query Logger → Metadata Store
+Queries
+  ↓
+Query Context Extractor + Clusterer
+  ↓
+Contextual Router / Bandit Policy
+  ↓
+Query Executor → Query Logger → Metadata Store
                               ↓
                     Workload Analyzer
                               ↓
                     Layout Generator
                               ↓
+              Migration Job Queue → Migration Worker
+                              ↓
                     Layout Migrator → New Parquet Files
                               ↓
-                    Evaluator → Reward Calculator
-                              ↓
-                    Multi-Armed Bandit → Next Layout
+               Evaluation Scheduler → Evaluator/Reward
 ```
 
 ## Installation
@@ -70,7 +75,7 @@ dbopt analyze --table-name events
 dbopt enqueue-migration --table-name events --mode full
 dbopt migration-worker --loop --sleep-sec 2
 
-# Phase 5: scheduled evaluation (rolling window)
+# Scheduled evaluation (rolling window)
 dbopt evaluate --table-name events --once
 dbopt evaluate --table-name events --loop --interval-sec 60
 
@@ -180,7 +185,8 @@ This workflow is the same loop, but starts from real data. The tooling still sta
 #### 1) Download or load the dataset
 
 ```bash
-dbopt download-nyc-taxi --table-name nyc_taxi --year 2023 --month 1 --color yellow
+# Example helper (kept out of the core CLI on purpose)
+uv run examples/download_nyc_taxi.py --table-name nyc_taxi --year 2023 --month 1 --color yellow
 ```
 
 Or load an existing Parquet dataset:
@@ -192,7 +198,7 @@ dbopt load-dataset --table-name nyc_taxi --source-path /path/to/parquet_dir
 #### 2) Run routed workload
 
 ```bash
-dbopt run-nyc-taxi-workload --table-name nyc_taxi --num-queries 2000 --explore --exploration-rate 0.3
+dbopt run-workload --table-name nyc_taxi --workload schema --num-queries 2000 --explore --exploration-rate 0.3
 ```
 
 #### 3) Create new layouts + evaluate
@@ -257,20 +263,20 @@ result = explorer.optimize_table("events")
 ### Adaptive Learning
 
 - **Multi-Armed Bandit**: UCB1 and Thompson Sampling algorithms
-- **Exploration/Exploitation**: 80% traffic to best layout, 20% to experiments
-- **Reward Function**: `reward = α * latency_improvement - β * rewrite_cost`
+- **Exploration/Exploitation**: Configurable per-run via `--exploration-rate` (default: 0.2)
+- **Reward Function**: Combines latency improvements (mean/p95/p99), rows-scanned improvements, and an optional stability term, then subtracts a normalized rewrite-cost penalty (`β`)
 
 ### Workload clustering (generic)
 
 - Queries are assigned a **stable cluster_id** derived from their query-shape signature.
 - Layout pools can be scoped per cluster to avoid one global layout dominating heterogeneous workloads.
 
-### Online evaluation (Phase 5)
+### Online evaluation
 
 - `evaluate` runs a rolling-window evaluation loop that records `layout_eval` rows when there are enough new samples.
 - This decouples learning from manual `optimize` runs.
 
-### Async / incremental rewrites (Phase 6)
+### Async / incremental rewrites
 
 - Migration jobs are queued in SQLite (`migration_job`) and processed by a worker.
 - Incremental mode rewrites datasets in batches of parquet files to reduce latency spikes.
@@ -342,7 +348,7 @@ This will:
 
 ## Future Enhancements
 
-- [ ] Incremental layout rewrites (instead of full rewrites)
+- [x] Incremental layout rewrites (batch Parquet files via async migration worker)
 - [ ] Support for more layout features (compression, indexing)
 - [ ] Distributed execution (Spark integration)
 - [ ] Real-time query routing

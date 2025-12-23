@@ -42,4 +42,7 @@ def test_query_logger_persists_cluster_id_and_context_key(tmp_path):
     logs = store.get_query_logs(table_name="t", limit=1)
     assert logs
     assert logs[0].get("context_key") is not None
+    # For simple SQL, parse confidence should be high and therefore cluster_id assigned.
     assert logs[0].get("cluster_id") is not None
+    assert logs[0].get("parse_success") in (0, 1, True, False)
+    assert logs[0].get("parse_confidence") is not None

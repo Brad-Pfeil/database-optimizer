@@ -2,7 +2,7 @@
 
 import json
 from collections import defaultdict
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from ..storage.metadata import MetadataStore
@@ -29,7 +29,7 @@ class WorkloadAnalyzer:
             Dictionary mapping column_name -> ColumnStats
         """
         # Get query logs for the table
-        end_time = datetime.utcnow()
+        end_time = datetime.now(timezone.utc)
         start_time = (
             end_time - timedelta(hours=window_hours) if window_hours else None
         )
@@ -213,7 +213,8 @@ class WorkloadAnalyzer:
         """Get a summary of the workload for a table."""
         query_logs = self.metadata_store.get_query_logs(
             table_name=table_name,
-            start_time=datetime.utcnow() - timedelta(hours=window_hours)
+            start_time=datetime.now(timezone.utc)
+            - timedelta(hours=window_hours)
             if window_hours
             else None,
         )

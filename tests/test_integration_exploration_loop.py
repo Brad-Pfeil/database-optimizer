@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from database_optimiser.adaptive.bandit import MultiArmedBandit
@@ -69,7 +69,12 @@ def _set_layout_created_at(
         cur = conn.cursor()
         cur.execute(
             "UPDATE table_layout SET created_at = ? WHERE layout_id = ?",
-            (created_at, layout_id),
+            (
+                int(
+                    created_at.replace(tzinfo=timezone.utc).timestamp() * 1000
+                ),
+                layout_id,
+            ),
         )
         conn.commit()
 
@@ -86,7 +91,7 @@ def test_end_to_end_exploration_produces_rewards_and_bandit_pulls(tmp_path):
     store = MetadataStore(config)
 
     table = "nyc_taxi"
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
 
     # Seed baseline (initial) queries before any layout creation
     with store._connection() as conn:  # noqa: SLF001 - test helper
@@ -100,7 +105,12 @@ def test_end_to_end_exploration_produces_rewards_and_bandit_pulls(tmp_path):
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    now - timedelta(hours=2, minutes=i),
+                    int(
+                        (now - timedelta(hours=2, minutes=i))
+                        .replace(tzinfo=timezone.utc)
+                        .timestamp()
+                        * 1000
+                    ),
                     None,
                     table,
                     None,

@@ -16,6 +16,10 @@ class Config:
     # Layout settings
     default_file_size_mb: float = 128.0
     max_layout_versions: int = 5
+    sort_mode: str = "fragment"  # none|fragment|partition_chunk
+    max_rows_in_memory_for_full_sort: int = 131072
+    migration_enable_row_chunking: bool = False
+    migration_validate_row_count: bool = True
 
     # Bandit algorithm settings
     exploration_rate: float = 0.2  # 20% traffic to experiments
@@ -41,11 +45,20 @@ class Config:
         0.99  # winsorize latency samples at this percentile
     )
 
+    # Rewrite cost normalization
+    rewrite_cost_normalizer_sec_default: float = 3600.0
+    rewrite_cost_normalizer_mode: str = "fixed"  # fixed|historical_median
+    rewrite_cost_normalizer_history_n: int = 50
+
     # Workload analysis settings
     analysis_window_hours: int = 24  # Hours of queries to analyze
 
     # Clustering settings (Phase 3)
     num_clusters_per_table: int = 8
+
+    # Query parsing / context extraction
+    parse_confidence_threshold: float = 0.7
+    sql_parser_dialect: str = "duckdb"
 
     # Candidate generation (Phase 4)
     candidate_beam_width: int = 30

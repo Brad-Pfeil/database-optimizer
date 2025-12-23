@@ -2,7 +2,8 @@
 
 import random
 import statistics
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+from hashlib import sha256
 from typing import Any, Dict, List, Optional
 
 from ..config import Config
@@ -57,6 +58,9 @@ class RewardCalculator:
         baseline_metrics: Dict[str, Any],
         new_metrics: Dict[str, Any],
         rewrite_cost_sec: float,
+        *,
+        table_name: Optional[str] = None,
+        cluster_id: Optional[str] = None,
     ) -> Dict[str, float]:
         """
         Calculate reward and expose the intermediate components for observability.
@@ -100,8 +104,36 @@ class RewardCalculator:
         )  # treat lower CV as better
 
         # Normalize rewrite cost (convert to a 0-1 scale)
-        # Assume max reasonable rewrite cost is 3600 seconds (1 hour)
-        normalized_rewrite_cost = min((rewrite_cost_sec or 0.0) / 3600.0, 1.0)
+        normalizer = float(
+            getattr(self.config, "rewrite_cost_normalizer_sec_default", 3600.0)
+            or 3600.0
+        )
+        mode = str(
+            getattr(self.config, "rewrite_cost_normalizer_mode", "fixed")
+            or "fixed"
+        ).lower()
+        if (
+            mode == "historical_median"
+            and table_name is not None
+            and normalizer > 0
+        ):
+            normalizer = self.metadata_store.get_rewrite_cost_normalizer_sec(
+                table_name=table_name,
+                cluster_id=cluster_id,
+                fallback_sec=normalizer,
+                limit=int(
+                    getattr(
+                        self.config, "rewrite_cost_normalizer_history_n", 50
+                    )
+                    or 50
+                ),
+            )
+        if normalizer <= 0:
+            normalizer = 3600.0
+
+        normalized_rewrite_cost = min(
+            (rewrite_cost_sec or 0.0) / normalizer, 1.0
+        )
 
         perf_term = (
             self.config.reward_w_mean * mean_impr
@@ -145,6 +177,7 @@ class RewardCalculator:
         new: List[float],
         iters: int,
         alpha: float,
+        seed: int,
     ) -> float:
         """
         Bootstrap a lower bound for mean latency improvement:
@@ -155,7 +188,7 @@ class RewardCalculator:
         b_mean = statistics.mean(baseline)
         if b_mean <= 0:
             return 0.0
-        rng = random.Random(0)
+        rng = random.Random(int(seed) & 0xFFFFFFFFFFFFFFFF)
         samples: List[float] = []
         for _ in range(max(1, iters)):
             b = [rng.choice(baseline) for _ in range(len(baseline))]
@@ -171,6 +204,19 @@ class RewardCalculator:
         k = int(len(samples) * alpha)
         k = min(max(k, 0), len(samples) - 1)
         return float(samples[k])
+
+    def _bootstrap_seed(
+        self,
+        *,
+        layout_id: str,
+        baseline_layout_id: str,
+        start_time: datetime,
+        end_time: datetime,
+    ) -> int:
+        s = (
+            f"{layout_id}|{baseline_layout_id}|{start_time.isoformat()}|{end_time.isoformat()}"
+        ).encode("utf-8")
+        return int.from_bytes(sha256(s).digest()[:8], "big")
 
     def evaluate_layout(
         self,
@@ -192,10 +238,10 @@ class RewardCalculator:
         Returns:
             Dictionary with evaluation results including reward_score
         """
-        end_time = datetime.utcnow()
+        end_time = datetime.now(timezone.utc)
         start_time = end_time - timedelta(hours=eval_window_hours)
 
-        # Get layout info to determine table name and creation time
+        # Get layout info to determine table name
         layout_info = self.metadata_store.get_layout(layout_id)
         if not layout_info:
             raise ValueError(f"Layout {layout_id} not found")
@@ -203,65 +249,33 @@ class RewardCalculator:
         table_name = layout_info["table_name"]
         if cluster_id is None:
             cluster_id = layout_info.get("cluster_id")
-        layout_created_at_raw = layout_info["created_at"]
+        # Baseline resolution: if not explicitly provided, compare vs active layout if present
+        # (else vs initial). Always compare on the exact same rolling window.
+        baseline_used: Optional[str] = baseline_layout_id
+        if baseline_used is None:
+            active = self.metadata_store.get_active_layout(table_name)
+            if active and active.get("layout_id") != layout_id:
+                baseline_used = str(active["layout_id"])
+            else:
+                baseline_used = "initial"
+        elif baseline_used == layout_id:
+            baseline_used = "initial"
 
-        # Parse created_at from string (SQLite stores as string)
-        if isinstance(layout_created_at_raw, str):
-            try:
-                # Try ISO format first
-                layout_created_at = datetime.fromisoformat(
-                    layout_created_at_raw.replace("Z", "+00:00")
-                )
-            except ValueError:
-                try:
-                    # Try parsing common SQLite timestamp format
-                    layout_created_at = datetime.strptime(
-                        layout_created_at_raw, "%Y-%m-%d %H:%M:%S"
-                    )
-                except ValueError:
-                    # Fallback to current time if parsing fails
-                    layout_created_at = datetime.utcnow()
-        elif isinstance(layout_created_at_raw, datetime):
-            layout_created_at = layout_created_at_raw
-        else:
-            # If it's None or unknown type, use current time
-            layout_created_at = datetime.utcnow()
-
-        # For new layout metrics: use queries AFTER the layout was created
-        # For baseline metrics: use queries BEFORE the layout was created (or from baseline layout)
-        new_start_time = max(start_time, layout_created_at)
-
-        # Get metrics for new layout (queries after it was created)
-        new_metrics = self.metrics_calculator.calculate_layout_metrics(
-            layout_id,
-            new_start_time,
+        baseline_metrics = self.metrics_calculator.calculate_layout_metrics(
+            baseline_used,
+            start_time,
             end_time,
             table_name=table_name,
             cluster_id=cluster_id,
         )
 
-        # Get baseline metrics
-        if baseline_layout_id:
-            # Compare against another layout - use same time window
-            baseline_metrics = (
-                self.metrics_calculator.calculate_layout_metrics(
-                    baseline_layout_id,
-                    start_time,
-                    end_time,
-                    table_name=table_name,
-                    cluster_id=cluster_id,
-                )
-            )
-        else:
-            # Compare against queries from BEFORE this layout was created
-            baseline_end_time = min(end_time, layout_created_at)
-            baseline_metrics = self.metrics_calculator.calculate_layout_metrics(
-                "initial",  # Use "initial" to get queries with NULL layout_id
-                start_time,
-                baseline_end_time,
-                table_name=table_name,
-                cluster_id=cluster_id,
-            )
+        new_metrics = self.metrics_calculator.calculate_layout_metrics(
+            layout_id,
+            start_time,
+            end_time,
+            table_name=table_name,
+            cluster_id=cluster_id,
+        )
 
         # Gate evaluation: don't score until we have enough data.
         min_q = int(getattr(self.config, "min_queries_for_eval", 0) or 0)
@@ -280,6 +294,8 @@ class RewardCalculator:
                 baseline_metrics=baseline_metrics,
                 new_metrics=new_metrics,
                 rewrite_cost_sec=rewrite_cost_sec,
+                table_name=table_name,
+                cluster_id=cluster_id,
             )
             reward_score = breakdown["reward"]
             eval_status = "scored"
@@ -288,19 +304,15 @@ class RewardCalculator:
             # If not confident, clamp to 0 (neutral) rather than rewarding noise.
             if reward_score > 0:
                 b_samples = self.metrics_calculator.get_latency_samples(
-                    "initial"
-                    if not baseline_layout_id
-                    else baseline_layout_id,
+                    baseline_used,
                     start_time,
-                    end_time
-                    if baseline_layout_id
-                    else min(end_time, layout_created_at),
+                    end_time,
                     table_name=table_name,
                     cluster_id=cluster_id,
                 )
                 n_samples = self.metrics_calculator.get_latency_samples(
                     layout_id,
-                    new_start_time,
+                    start_time,
                     end_time,
                     table_name=table_name,
                     cluster_id=cluster_id,
@@ -316,6 +328,12 @@ class RewardCalculator:
                     new=n_samples,
                     iters=int(self.config.reward_bootstrap_iters),
                     alpha=float(self.config.reward_confidence_alpha),
+                    seed=self._bootstrap_seed(
+                        layout_id=layout_id,
+                        baseline_layout_id=str(baseline_used),
+                        start_time=start_time,
+                        end_time=end_time,
+                    ),
                 )
                 if lb <= 0:
                     reward_score = 0.0
@@ -324,6 +342,11 @@ class RewardCalculator:
         # Record evaluation
         eval_id = self.metadata_store.record_evaluation(
             layout_id=layout_id,
+            table_name=table_name,
+            cluster_id=cluster_id,
+            baseline_layout_id=baseline_used,
+            eval_mode="natural_window",
+            eval_status=eval_status,
             eval_window_start=start_time,
             eval_window_end=end_time,
             avg_latency_ms=new_metrics["avg_latency_ms"],
@@ -351,16 +374,8 @@ class RewardCalculator:
                 "start": start_time,
                 "end": end_time,
             },
-            "baseline_window": {
-                "start": start_time,
-                "end": end_time
-                if baseline_layout_id
-                else min(end_time, layout_created_at),
-            },
-            "new_window": {
-                "start": new_start_time,
-                "end": end_time,
-            },
+            "baseline_layout_id": baseline_used,
+            "eval_mode": "natural_window",
             "rewrite_cost_sec": rewrite_cost_sec,
         }
 
@@ -385,6 +400,8 @@ class RewardCalculator:
         table_name = layout_info["table_name"]
         if cluster_id is None:
             cluster_id = layout_info.get("cluster_id")
+
+        baseline_used = baseline_layout_id or "initial"
 
         if baseline_layout_id:
             baseline_metrics = (
@@ -432,6 +449,8 @@ class RewardCalculator:
                 baseline_metrics=baseline_metrics,
                 new_metrics=new_metrics,
                 rewrite_cost_sec=rewrite_cost_sec,
+                table_name=table_name,
+                cluster_id=cluster_id,
             )
             reward_score = breakdown["reward"]
             eval_status = "scored"
@@ -464,6 +483,12 @@ class RewardCalculator:
                     new=n_samples,
                     iters=int(self.config.reward_bootstrap_iters),
                     alpha=float(self.config.reward_confidence_alpha),
+                    seed=self._bootstrap_seed(
+                        layout_id=layout_id,
+                        baseline_layout_id=str(baseline_used),
+                        start_time=start_time,
+                        end_time=end_time,
+                    ),
                 )
                 if lb <= 0:
                     reward_score = 0.0
@@ -472,6 +497,11 @@ class RewardCalculator:
 
         eval_id = self.metadata_store.record_evaluation(
             layout_id=layout_id,
+            table_name=table_name,
+            cluster_id=cluster_id,
+            baseline_layout_id=baseline_used,
+            eval_mode="natural_window",
+            eval_status=eval_status,
             eval_window_start=start_time,
             eval_window_end=end_time,
             avg_latency_ms=new_metrics["avg_latency_ms"],
@@ -493,5 +523,7 @@ class RewardCalculator:
             "eval_status": eval_status,
             "min_queries_for_eval": min_q,
             "eval_window": {"start": start_time, "end": end_time},
+            "baseline_layout_id": baseline_used,
+            "eval_mode": "natural_window",
             "rewrite_cost_sec": rewrite_cost_sec,
         }

@@ -5,7 +5,7 @@ from typing import Any, Dict, List, Optional
 
 from ..analyzer.workload_clusterer import WorkloadClusterer
 from ..config import Config
-from ..query.context import extract_query_context
+from ..query.context import extract_query_context_result
 from .metadata import MetadataStore
 
 
@@ -256,9 +256,20 @@ class QueryLogger:
         """Parse and log a query execution."""
         parsed = self.parse_query(sql)
 
-        ctx = extract_query_context(sql)
-        context_key = ctx.key()
-        cluster_id = self.clusterer.cluster_id_for_context_key(context_key)
+        ctx_res = extract_query_context_result(
+            sql, dialect=self.config.sql_parser_dialect
+        )
+        context_key = ctx_res.context.key()
+        cluster_id: Optional[str]
+        if (
+            ctx_res.parse_success
+            and ctx_res.parse_confidence
+            >= self.config.parse_confidence_threshold
+        ):
+            cluster_id = self.clusterer.cluster_id_for_context_key(context_key)
+        else:
+            # Exclude low-confidence parses from learning (no cluster assignment)
+            cluster_id = None
 
         return self.metadata_store.log_query(
             table_name=parsed["table_name"],
@@ -275,4 +286,7 @@ class QueryLogger:
             layout_id=layout_id,
             context_key=context_key,
             cluster_id=cluster_id,
+            parse_success=ctx_res.parse_success,
+            parse_confidence=ctx_res.parse_confidence,
+            parser_version=ctx_res.parser_version,
         )

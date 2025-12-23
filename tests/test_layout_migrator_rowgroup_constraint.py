@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 
@@ -26,12 +25,12 @@ def test_migrate_table_sets_rowgroup_leq_file_rows(tmp_path: Path):
     source_path = config.data_dir / table_name / "layout_initial"
     source_path.mkdir(parents=True, exist_ok=True)
 
-    df = pd.DataFrame({"a": list(range(10)), "b": ["x"] * 10})
     pq.write_table(
-        pa.Table.from_pandas(df), source_path / "part_00000.parquet"
+        pa.table({"a": list(range(10)), "b": ["x"] * 10}),
+        source_path / "part_00000.parquet",
     )
 
-    # This is the failing shape: non-partitioned write + file_size_mb set (=> max_rows_per_file set).
+    # This is the failing shape: non-partitioned write + file_size_mb set.
     layout_spec = LayoutSpec(
         partition_cols=None, sort_cols=None, file_size_mb=1.0
     )

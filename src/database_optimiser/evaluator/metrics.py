@@ -35,25 +35,14 @@ class MetricsCalculator:
             Dictionary with metrics: avg_latency_ms, p95_latency_ms, p99_latency_ms,
             avg_rows_scanned, queries_evaluated
         """
-        # Get query logs for this specific layout in the time window
         query_logs = self.metadata_store.get_query_logs(
             table_name=table_name,
             start_time=start_time,
             end_time=end_time,
             layout_id=layout_id if layout_id != "initial" else None,
+            layout_id_is_null=(layout_id == "initial"),
             cluster_id=cluster_id,
         )
-
-        # If layout_id is "initial", get queries with NULL layout_id (before any layout was created)
-        if layout_id == "initial":
-            # Get all queries and filter for those with NULL layout_id
-            all_logs = self.metadata_store.get_query_logs(
-                table_name=table_name,
-                start_time=start_time,
-                end_time=end_time,
-                cluster_id=cluster_id,
-            )
-            query_logs = [log for log in all_logs if not log.get("layout_id")]
 
         if not query_logs:
             return {
@@ -123,16 +112,9 @@ class MetricsCalculator:
             start_time=start_time,
             end_time=end_time,
             layout_id=layout_id if layout_id != "initial" else None,
+            layout_id_is_null=(layout_id == "initial"),
             cluster_id=cluster_id,
         )
-        if layout_id == "initial":
-            all_logs = self.metadata_store.get_query_logs(
-                table_name=table_name,
-                start_time=start_time,
-                end_time=end_time,
-                cluster_id=cluster_id,
-            )
-            query_logs = [log for log in all_logs if not log.get("layout_id")]
 
         return [
             float(log["runtime_ms"])

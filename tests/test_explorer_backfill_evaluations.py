@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from database_optimiser.adaptive.explorer import LayoutExplorer
 from database_optimiser.config import Config
@@ -66,7 +66,7 @@ def _insert_query_log(
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                ts,
+                int(ts.replace(tzinfo=timezone.utc).timestamp() * 1000),
                 None,
                 table_name,
                 layout_id,
@@ -91,7 +91,12 @@ def _set_layout_created_at(
         cur = conn.cursor()
         cur.execute(
             "UPDATE table_layout SET created_at = ? WHERE layout_id = ?",
-            (created_at, layout_id),
+            (
+                int(
+                    created_at.replace(tzinfo=timezone.utc).timestamp() * 1000
+                ),
+                layout_id,
+            ),
         )
         conn.commit()
 
@@ -130,7 +135,7 @@ def test_optimize_backfills_scored_evals_and_updates_bandit(tmp_path):
     )
     store.activate_layout(layout_id, table)
 
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     created_at = now - timedelta(hours=1)
     _set_layout_created_at(store, layout_id, created_at)
 

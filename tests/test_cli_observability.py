@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from click.testing import CliRunner
@@ -41,7 +41,7 @@ def test_metadata_eval_history_filters_and_order(tmp_path: Path) -> None:
         cluster_id=None,
     )
 
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     store.record_evaluation(
         layout_id="l1",
         eval_window_start=now - timedelta(hours=2),
@@ -142,7 +142,7 @@ def test_cli_history_json_output(tmp_path: Path) -> None:
         layout_path=str(tmp_path / "l1"),
         file_size_mb=1.0,
     )
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     store.record_evaluation(
         layout_id="l1",
         eval_window_start=now - timedelta(hours=1),
@@ -183,7 +183,7 @@ def test_cli_report_writes_artifacts(tmp_path: Path) -> None:
         layout_path=str(tmp_path / "l1"),
         file_size_mb=1.0,
     )
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     store.record_evaluation(
         layout_id="l1",
         eval_window_start=now - timedelta(hours=1),

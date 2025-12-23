@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from database_optimiser.adaptive.bandit import MultiArmedBandit
 from database_optimiser.config import Config
@@ -26,7 +26,7 @@ def test_bandit_loads_only_non_null_rewards(tmp_path):
         file_size_mb=128.0,
     )
 
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     store.record_evaluation(
         layout_id=layout_id,
         eval_window_start=now - timedelta(hours=2),

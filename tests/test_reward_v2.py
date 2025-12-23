@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from unittest.mock import Mock
 
 from database_optimiser.config import Config
@@ -53,7 +53,12 @@ def _set_layout_created_at(
         cur = conn.cursor()
         cur.execute(
             "UPDATE table_layout SET created_at = ? WHERE layout_id = ?",
-            (created_at, layout_id),
+            (
+                int(
+                    created_at.replace(tzinfo=timezone.utc).timestamp() * 1000
+                ),
+                layout_id,
+            ),
         )
         conn.commit()
 
@@ -112,7 +117,7 @@ def test_reward_guardrail_min_samples_blocks_scoring(tmp_path):
         layout_path=str(tmp_path / "dummy"),
         file_size_mb=1.0,
     )
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     _set_layout_created_at(store, layout_id, now - timedelta(hours=1))
 
     # Not enough queries: only 1 baseline + 1 new
@@ -162,7 +167,7 @@ def test_reward_guardrail_confidence_blocks_noise_win(tmp_path):
         layout_path=str(tmp_path / "dummy"),
         file_size_mb=1.0,
     )
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     _set_layout_created_at(store, layout_id, now - timedelta(hours=1))
 
     # Baseline: around 100ms, New: around 99ms (tiny delta)

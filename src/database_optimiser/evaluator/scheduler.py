@@ -7,7 +7,7 @@ is invoked. It is dataset-agnostic: it relies only on query telemetry stored in 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from ..config import Config
@@ -22,7 +22,7 @@ class EvaluationScheduler:
     reward_calculator: RewardCalculator
 
     def _now(self) -> datetime:
-        return datetime.utcnow()
+        return datetime.now(timezone.utc)
 
     def _count_queries_in_window(
         self,

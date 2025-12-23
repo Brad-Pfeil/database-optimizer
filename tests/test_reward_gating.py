@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from database_optimiser.config import Config
 from database_optimiser.evaluator.metrics import MetricsCalculator
@@ -26,7 +26,7 @@ def _insert_query_log(
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                ts,
+                int(ts.replace(tzinfo=timezone.utc).timestamp() * 1000),
                 None,
                 table_name,
                 layout_id,
@@ -51,7 +51,12 @@ def _set_layout_created_at(
         cur = conn.cursor()
         cur.execute(
             "UPDATE table_layout SET created_at = ? WHERE layout_id = ?",
-            (created_at, layout_id),
+            (
+                int(
+                    created_at.replace(tzinfo=timezone.utc).timestamp() * 1000
+                ),
+                layout_id,
+            ),
         )
         conn.commit()
 
@@ -80,7 +85,7 @@ def test_reward_is_none_when_insufficient_new_queries(tmp_path):
         file_size_mb=128.0,
     )
 
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     created_at = now - timedelta(hours=1)
     _set_layout_created_at(store, layout_id, created_at)
 
@@ -137,7 +142,7 @@ def test_reward_is_scored_when_enough_queries(tmp_path):
         file_size_mb=128.0,
     )
 
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     created_at = now - timedelta(hours=1)
     _set_layout_created_at(store, layout_id, created_at)
 
