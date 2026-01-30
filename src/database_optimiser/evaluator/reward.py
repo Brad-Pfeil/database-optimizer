@@ -1,14 +1,12 @@
 """Reward function for layout evaluation."""
 
-import random
-import statistics
 from datetime import datetime, timedelta, timezone
-from hashlib import sha256
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 from ..config import Config
 from ..storage.metadata import MetadataStore
 from .metrics import MetricsCalculator
+from .stats import bootstrap_ci_lower_bound, bootstrap_seed, winsorize
 
 
 class RewardCalculator:
@@ -158,53 +156,6 @@ class RewardCalculator:
             "reward": reward,
         }
 
-    def _winsorize(
-        self,
-        xs: List[float],
-        pctl: float,
-    ) -> List[float]:
-        if not xs:
-            return []
-        xs2 = sorted(xs)
-        idx = int(len(xs2) * pctl)
-        idx = min(max(idx, 0), len(xs2) - 1)
-        cap = xs2[idx]
-        return [min(x, cap) for x in xs2]
-
-    def _bootstrap_ci_lower_bound(
-        self,
-        baseline: List[float],
-        new: List[float],
-        iters: int,
-        alpha: float,
-        seed: int,
-    ) -> float:
-        """
-        Bootstrap a lower bound for mean latency improvement:
-        improvement = (mean(b) - mean(n)) / mean(b)
-        """
-        if not baseline or not new:
-            return 0.0
-        b_mean = statistics.mean(baseline)
-        if b_mean <= 0:
-            return 0.0
-        rng = random.Random(int(seed) & 0xFFFFFFFFFFFFFFFF)
-        samples: List[float] = []
-        for _ in range(max(1, iters)):
-            b = [rng.choice(baseline) for _ in range(len(baseline))]
-            n = [rng.choice(new) for _ in range(len(new))]
-            b_m = statistics.mean(b)
-            n_m = statistics.mean(n)
-            if b_m <= 0:
-                continue
-            samples.append((b_m - n_m) / b_m)
-        if not samples:
-            return 0.0
-        samples.sort()
-        k = int(len(samples) * alpha)
-        k = min(max(k, 0), len(samples) - 1)
-        return float(samples[k])
-
     def _bootstrap_seed(
         self,
         *,
@@ -213,10 +164,12 @@ class RewardCalculator:
         start_time: datetime,
         end_time: datetime,
     ) -> int:
-        s = (
-            f"{layout_id}|{baseline_layout_id}|{start_time.isoformat()}|{end_time.isoformat()}"
-        ).encode("utf-8")
-        return int.from_bytes(sha256(s).digest()[:8], "big")
+        return bootstrap_seed(
+            layout_id=layout_id,
+            baseline_layout_id=baseline_layout_id,
+            start_time=start_time,
+            end_time=end_time,
+        )
 
     def evaluate_layout(
         self,
@@ -317,18 +270,18 @@ class RewardCalculator:
                     table_name=table_name,
                     cluster_id=cluster_id,
                 )
-                b_samples = self._winsorize(
+                b_samples = winsorize(
                     b_samples, self.config.reward_outlier_winsor_pctl
                 )
-                n_samples = self._winsorize(
+                n_samples = winsorize(
                     n_samples, self.config.reward_outlier_winsor_pctl
                 )
-                lb = self._bootstrap_ci_lower_bound(
+                lb = bootstrap_ci_lower_bound(
                     baseline=b_samples,
                     new=n_samples,
                     iters=int(self.config.reward_bootstrap_iters),
                     alpha=float(self.config.reward_confidence_alpha),
-                    seed=self._bootstrap_seed(
+                    seed=bootstrap_seed(
                         layout_id=layout_id,
                         baseline_layout_id=str(baseline_used),
                         start_time=start_time,
@@ -472,18 +425,18 @@ class RewardCalculator:
                     table_name=table_name,
                     cluster_id=cluster_id,
                 )
-                b_samples = self._winsorize(
+                b_samples = winsorize(
                     b_samples, self.config.reward_outlier_winsor_pctl
                 )
-                n_samples = self._winsorize(
+                n_samples = winsorize(
                     n_samples, self.config.reward_outlier_winsor_pctl
                 )
-                lb = self._bootstrap_ci_lower_bound(
+                lb = bootstrap_ci_lower_bound(
                     baseline=b_samples,
                     new=n_samples,
                     iters=int(self.config.reward_bootstrap_iters),
                     alpha=float(self.config.reward_confidence_alpha),
-                    seed=self._bootstrap_seed(
+                    seed=bootstrap_seed(
                         layout_id=layout_id,
                         baseline_layout_id=str(baseline_used),
                         start_time=start_time,

@@ -1,6 +1,7 @@
 """CLI interface for the database optimizer."""
 
 import json
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -28,6 +29,51 @@ from ..query.executor import QueryExecutor
 from ..storage.metadata import MetadataStore
 from ..storage.query_logger import QueryLogger
 from ..workload.runner import run_queries
+
+
+@dataclass(frozen=True)
+class ExplorerComponents:
+    metadata_store: MetadataStore
+    query_logger: QueryLogger
+    query_executor: QueryExecutor
+    workload_analyzer: WorkloadAnalyzer
+    layout_generator: LayoutGenerator
+    layout_migrator: LayoutMigrator
+    metrics_calculator: MetricsCalculator
+    reward_calculator: RewardCalculator
+    explorer: LayoutExplorer
+
+
+def _build_explorer_components(config: Config) -> ExplorerComponents:
+    metadata_store = MetadataStore(config)
+    query_logger = QueryLogger(metadata_store, config)
+    query_executor = QueryExecutor(config, metadata_store, query_logger)
+    workload_analyzer = WorkloadAnalyzer(metadata_store)
+    layout_generator = LayoutGenerator(workload_analyzer, config)
+    layout_migrator = LayoutMigrator(config, metadata_store)
+    metrics_calculator = MetricsCalculator(metadata_store)
+    reward_calculator = RewardCalculator(
+        metrics_calculator, config, metadata_store
+    )
+    explorer = LayoutExplorer(
+        config,
+        metadata_store,
+        layout_generator,
+        layout_migrator,
+        reward_calculator,
+        query_executor,
+    )
+    return ExplorerComponents(
+        metadata_store=metadata_store,
+        query_logger=query_logger,
+        query_executor=query_executor,
+        workload_analyzer=workload_analyzer,
+        layout_generator=layout_generator,
+        layout_migrator=layout_migrator,
+        metrics_calculator=metrics_calculator,
+        reward_calculator=reward_calculator,
+        explorer=explorer,
+    )
 
 
 @click.group()
@@ -142,24 +188,10 @@ def run_workload(
         config.exploration_rate = exploration_rate
 
     # Initialize components
-    metadata_store = MetadataStore(config)
-    query_logger = QueryLogger(metadata_store, config)
-    query_executor = QueryExecutor(config, metadata_store, query_logger)
-    workload_analyzer = WorkloadAnalyzer(metadata_store)
-    layout_generator = LayoutGenerator(workload_analyzer, config)
-    layout_migrator = LayoutMigrator(config, metadata_store)
-    metrics_calculator = MetricsCalculator(metadata_store)
-    reward_calculator = RewardCalculator(
-        metrics_calculator, config, metadata_store
-    )
-    explorer = LayoutExplorer(
-        config,
-        metadata_store,
-        layout_generator,
-        layout_migrator,
-        reward_calculator,
-        query_executor,
-    )
+    components = _build_explorer_components(config)
+    metadata_store = components.metadata_store
+    query_executor = components.query_executor
+    explorer = components.explorer
 
     # Register tables
     ui: UI = ctx.obj["ui"]
@@ -253,24 +285,10 @@ def optimize(ctx, table_name):
     config = ctx.obj["config"]
 
     # Initialize all components
-    metadata_store = MetadataStore(config)
-    query_logger = QueryLogger(metadata_store, config)
-    query_executor = QueryExecutor(config, metadata_store, query_logger)
-    workload_analyzer = WorkloadAnalyzer(metadata_store)
-    layout_generator = LayoutGenerator(workload_analyzer, config)
-    layout_migrator = LayoutMigrator(config, metadata_store)
-    metrics_calculator = MetricsCalculator(metadata_store)
-    reward_calculator = RewardCalculator(
-        metrics_calculator, config, metadata_store
-    )
-    explorer = LayoutExplorer(
-        config,
-        metadata_store,
-        layout_generator,
-        layout_migrator,
-        reward_calculator,
-        query_executor,
-    )
+    components = _build_explorer_components(config)
+    metadata_store = components.metadata_store
+    query_executor = components.query_executor
+    explorer = components.explorer
 
     # Register current table
     active_layout = metadata_store.get_active_layout(table_name)
@@ -914,23 +932,10 @@ def evaluate(
 def enqueue_migration(ctx, table_name, mode, cluster_id):
     """Enqueue a migration job that creates a new layout in the background (Phase 6)."""
     config = ctx.obj["config"]
-    metadata_store = MetadataStore(config)
-    query_logger = QueryLogger(metadata_store, config)
-    query_executor = QueryExecutor(config, metadata_store, query_logger)
-    workload_analyzer = WorkloadAnalyzer(metadata_store)
-    layout_generator = LayoutGenerator(workload_analyzer, config)
-    layout_migrator = LayoutMigrator(config, metadata_store)
-    reward_calculator = RewardCalculator(
-        MetricsCalculator(metadata_store), config, metadata_store
-    )
-    explorer = LayoutExplorer(
-        config=config,
-        metadata_store=metadata_store,
-        layout_generator=layout_generator,
-        layout_migrator=layout_migrator,
-        reward_calculator=reward_calculator,
-        query_executor=query_executor,
-    )
+    components = _build_explorer_components(config)
+    metadata_store = components.metadata_store
+    layout_migrator = components.layout_migrator
+    explorer = components.explorer
 
     proposed = explorer.propose_new_layout(
         table_name, window_hours=config.analysis_window_hours

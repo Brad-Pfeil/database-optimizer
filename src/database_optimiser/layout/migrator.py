@@ -1,10 +1,11 @@
 """Layout migration: rewrite Parquet datasets with new layouts."""
 
 import glob
-import shutil
 import hashlib
 import json
+import shutil
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Sequence
 
@@ -15,6 +16,17 @@ import pyarrow.dataset as ds
 from ..config import Config
 from ..storage.metadata import MetadataStore
 from .spec import LayoutSpec
+
+
+@dataclass(frozen=True)
+class MigrationPlan:
+    requested_partition_cols: Optional[list[str]]
+    requested_sort_cols: Optional[list[str]]
+    effective_partition_cols: Optional[list[str]]
+    derived_partition_map: dict[str, str]
+    effective_sort_cols: Optional[list[str]]
+    max_rows_per_file: Optional[int]
+    max_rows_per_group: Optional[int]
 
 
 class LayoutMigrator:
@@ -49,14 +61,6 @@ class LayoutMigrator:
             Path to the new layout
         """
         start_time = time.time()
-        requested_partition_cols = (
-            list(layout_spec.partition_cols)
-            if layout_spec.partition_cols
-            else None
-        )
-        requested_sort_cols = (
-            list(layout_spec.sort_cols) if layout_spec.sort_cols else None
-        )
 
         # Create output directory (README expects layout_<id>)
         output_path = self.config.data_dir / table_name / f"layout_{layout_id}"
@@ -79,6 +83,60 @@ class LayoutMigrator:
 
         # Read source dataset
         source_dataset = ds.dataset(source_path, format="parquet")
+        plan = self._plan_migration(source_dataset, layout_spec)
+
+        self._rewrite_dataset_streaming(
+            source_dataset=source_dataset,
+            output_path=tmp_path,
+            sort_cols=list(plan.effective_sort_cols or []),
+            effective_partition_cols=plan.effective_partition_cols,
+            derived_partition_map=plan.derived_partition_map,
+            max_rows_per_file=plan.max_rows_per_file,
+            max_rows_per_group=plan.max_rows_per_group,
+            existing_data_behavior="overwrite_or_ignore",
+        )
+
+        validation = self._validate_dataset_dir(tmp_path)
+        tmp_path.rename(output_path)
+
+        rewrite_time = time.time() - start_time
+
+        # Record layout in metadata
+        notes_obj: dict[str, object] = {
+            "derived_partition_cols": plan.derived_partition_map,
+            "requested_partition_cols": plan.requested_partition_cols,
+            "effective_partition_cols": plan.effective_partition_cols,
+            "requested_sort_cols": plan.requested_sort_cols,
+            "effective_sort_cols": plan.effective_sort_cols,
+            "validation": validation,
+        }
+        self.metadata_store.create_layout(
+            layout_id=layout_id,
+            table_name=table_name,
+            partition_cols=plan.effective_partition_cols
+            or plan.requested_partition_cols,
+            sort_cols=plan.effective_sort_cols or plan.requested_sort_cols,
+            layout_path=str(output_path),
+            file_size_mb=layout_spec.file_size_mb,
+            notes=json.dumps(notes_obj),
+        )
+
+        print(f"Migration complete in {rewrite_time:.2f} seconds")
+        print(f"  Output: {output_path}")
+
+        return output_path
+
+    def _plan_migration(
+        self, source_dataset: ds.Dataset, layout_spec: LayoutSpec
+    ) -> MigrationPlan:
+        requested_partition_cols = (
+            list(layout_spec.partition_cols)
+            if layout_spec.partition_cols
+            else None
+        )
+        requested_sort_cols = (
+            list(layout_spec.sort_cols) if layout_spec.sort_cols else None
+        )
 
         # Calculate max_rows_per_file more reasonably
         max_rows_per_file: Optional[int] = None
@@ -107,8 +165,8 @@ class LayoutMigrator:
         max_rows_per_group = max_rows_per_file if max_rows_per_file else None
 
         # Track effective partitioning and any derived column mapping for equivalence-aware de-dupe.
-        effective_partition_cols: Optional[list[str]] = None
-        derived_partition_map: dict[str, str] = {}
+        effective_partition_cols: Optional[list[str]]
+        derived_partition_map: dict[str, str]
 
         # Partition planning (shared with incremental mode): coarsen datetime or drop high-card cols.
         if layout_spec.partition_cols:
@@ -129,46 +187,15 @@ class LayoutMigrator:
             if c in source_dataset.schema.names
         ] or None
 
-        self._rewrite_dataset_streaming(
-            source_dataset=source_dataset,
-            output_path=tmp_path,
-            sort_cols=list(effective_sort_cols or []),
+        return MigrationPlan(
+            requested_partition_cols=requested_partition_cols,
+            requested_sort_cols=requested_sort_cols,
             effective_partition_cols=effective_partition_cols,
             derived_partition_map=derived_partition_map,
+            effective_sort_cols=effective_sort_cols,
             max_rows_per_file=max_rows_per_file,
             max_rows_per_group=max_rows_per_group,
-            existing_data_behavior="overwrite_or_ignore",
         )
-
-        validation = self._validate_dataset_dir(tmp_path)
-        tmp_path.rename(output_path)
-
-        rewrite_time = time.time() - start_time
-
-        # Record layout in metadata
-        notes_obj: dict[str, object] = {
-            "derived_partition_cols": derived_partition_map,
-            "requested_partition_cols": requested_partition_cols,
-            "effective_partition_cols": effective_partition_cols,
-            "requested_sort_cols": requested_sort_cols,
-            "effective_sort_cols": effective_sort_cols,
-            "validation": validation,
-        }
-        self.metadata_store.create_layout(
-            layout_id=layout_id,
-            table_name=table_name,
-            partition_cols=effective_partition_cols
-            or requested_partition_cols,
-            sort_cols=effective_sort_cols or requested_sort_cols,
-            layout_path=str(output_path),
-            file_size_mb=layout_spec.file_size_mb,
-            notes=json.dumps(notes_obj),
-        )
-
-        print(f"Migration complete in {rewrite_time:.2f} seconds")
-        print(f"  Output: {output_path}")
-
-        return output_path
 
     def get_source_path(
         self,
